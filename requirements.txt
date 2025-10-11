@@ -1,0 +1,17 @@
+streamlit
+python-dotenv
+pydantic
+sqlmodel
+dateparser
+spacy
+transformers
+sentence-transformers
+faiss-cpu
+torch
+scikit-learn
+# Optional providers:
+openai>=1.0.0
+anthropic
+plotly
+wordcloud
+

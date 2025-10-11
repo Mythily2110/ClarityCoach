@@ -1,0 +1,22 @@
+app:
+  title: "ClarityCoach — Conversational Well-Being Assistant"
+
+models:
+  provider: ${LLM_PROVIDER:local}
+  chat: ${LLM_MODEL:gpt-4o-mini}
+  embeddings: ${EMBEDDINGS_MODEL:sentence-transformers/all-MiniLM-L6-v2}
+
+nlu:
+  intent_confidence_floor: 0.45
+
+rag:
+  kb_path: data/kb
+  index_path: data/index
+  chunk_size: 800
+  top_k: 4
+
+safety:
+  crisis_regex: "(suicide|kill myself|end my life|self-harm|overdose)"
+
+db:
+  path: data/claritycoach.db
