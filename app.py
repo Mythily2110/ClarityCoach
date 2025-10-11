@@ -309,96 +309,71 @@ st.title("🧭 ClarityCoach — Student Mental-Health Chatbot")
 st.caption("Not medical advice. If you're in crisis, call your local emergency number or 988 in the US.")
 st.divider()
 
-# ------------------------------------------------------------------------------
-# SECTION: CHAT
-# ------------------------------------------------------------------------------
-CHAT_INPUT_KEY = "chat_input_main_v3"
-
+# -------------------- CHAT SECTION --------------------
 if st.session_state.section == "Chat":
     # Streak pill
     streak = compute_7day_streak_from_journal()
     streak_text = f"🔥 {streak}-day streak" if streak > 0 else "Let’s start a streak today ✨"
-    st.markdown(f"<div style='margin-bottom:.5rem; font-weight:600;'>{streak_text}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='margin-bottom:.5rem; font-weight:600;'>{streak_text}</div>",
+                unsafe_allow_html=True)
 
-    # Chips → auto-fill + auto-send
-    def _fill_and_send(txt: str):
-        st.session_state[CHAT_INPUT_KEY] = txt
-        st.session_state["__send_now"] = True
+    # --- helper to fire a chip without touching the chat_input widget ---
+    def _fire_chip(txt: str):
+        # store the text and request a rerun; we'll process before showing chat_input
+        st.session_state["__chip_text"] = txt
+        st.session_state["__chip_fire"] = True
         st.rerun()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.button("3-day exam plan", on_click=_fill_and_send,
+    c1.button("3-day exam plan", on_click=_fire_chip,
               args=("I have an exam in 3 days. Make me a realistic 3-day study plan.",))
-    c2.button("rewrite kindly", on_click=_fill_and_send,
-              args=("rewrite kindly: I keep failing and feel discouraged",))
-    c3.button("focus w/o phone", on_click=_fill_and_send,
+    c2.button("rewrite kindly", on_click=_fire_chip,
+              args=("rewrite kindly: I keep failing and feel stupid",))
+    c3.button("focus w/o phone", on_click=_fire_chip,
               args=("tips to focus without my phone",))
-    c4.button("summarize week", on_click=_fill_and_send,
+    c4.button("summarize week", on_click=_fire_chip,
               args=("summarize my week",))
 
-    # Render transcript
+    # ---- render prior turns ----
     if "history" not in st.session_state:
         st.session_state.history = []
     for role, msg in st.session_state.history:
         st.chat_message("user" if role == "user" else "assistant").markdown(msg)
 
-    # Single chat input
-    prompt = st.chat_input("Tell me what's up… (e.g., start a 25 minute focus timer)", key=CHAT_INPUT_KEY)
-    if st.session_state.pop("__send_now", False):
-        prompt = st.session_state.get(CHAT_INPUT_KEY, "")
+    # ---- process any chip text BEFORE we create chat_input ----
+    if st.session_state.pop("__chip_fire", False):
+        chip_text = st.session_state.pop("__chip_text", "").strip()
+        if chip_text:
+            st.chat_message("user").markdown(chip_text)
+            # empathy first, then your handle_turn
+            mood = detect_mood(chip_text)
+            if mood:
+                reply = empathetic_reply(mood, chip_text)
+            else:
+                reply = handle_turn(chip_text)
 
-    # OFFER state machine:
-    # - 'timer_or_journal' → the next input chooses timer or journal
-    # - 'await_journal_text' → the next input is saved as a journal entry
+            with st.chat_message("assistant"):
+                st.markdown(reply)
+
+            st.session_state.history.append(("user", chip_text))
+            st.session_state.history.append(("assistant", reply))
+            st.rerun()
+
+    # ---- regular free-typed chat input (we never try to set its value programmatically) ----
+    prompt = st.chat_input("Tell me what's up… (e.g., start a 25 minute focus timer)",
+                           key="chat_input_main_v3")
     if prompt:
         st.chat_message("user").markdown(prompt)
-
         with st.chat_message("assistant"):
-            placeholder = st.empty()
-            placeholder.markdown("…")
-
-            # 1) Awaiting journal text: save it
-            if st.session_state.get("pending_offer") == "await_journal_text":
-                note = prompt.strip()
-                if note:
-                    add_journal(note)
-                    reply = "Added to your journal. Want a weekly summary?"
-                    st.session_state.pop("pending_offer", None)
-                else:
-                    reply = "Tell me the note to add and I’ll save it."
-                placeholder.markdown(reply)
-
-            # 2) Offered timer/journal: interpret choice or ask clarify
-            elif st.session_state.get("pending_offer") == "timer_or_journal":
-                txt = prompt.lower().strip()
-                if "timer" in txt or "focus" in txt:
-                    mins = _extract_minutes(prompt, default_min=10)
-                    st.session_state.pop("pending_offer", None)
-                    reply = handle_turn(f"start a {mins} minute focus timer")
-                elif "journal" in txt or "note" in txt:
-                    st.session_state["pending_offer"] = "await_journal_text"
-                    reply = "Okay—what should I add to your journal?"
-                elif _is_affirmation(prompt):
-                    reply = "Great—should I **start a focus timer** (how many minutes?) or **add a journal note**?"
-                else:
-                    st.session_state.pop("pending_offer", None)
-                    reply = handle_turn(prompt)
-                placeholder.markdown(reply)
-
-            # 3) Normal: empathy first, then set offer; otherwise route
-            else:
-                mood = detect_mood(prompt)
-                if mood:
-                    reply = empathetic_reply(mood, prompt)
-                    st.session_state["pending_offer"] = "timer_or_journal"
-                else:
-                    reply = handle_turn(prompt)
-                placeholder.markdown(reply)
-
-        # persist transcript
+            # show a quick typing placeholder if you want:
+            # ph = st.empty(); ph.markdown("…")
+            mood = detect_mood(prompt)
+            reply = empathetic_reply(mood, prompt) if mood else handle_turn(prompt)
+            st.markdown(reply)
         st.session_state.history.append(("user", prompt))
         st.session_state.history.append(("assistant", reply))
         st.rerun()
+
 
 # ------------------------------------------------------------------------------
 # SECTION: TIMER
