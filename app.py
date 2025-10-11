@@ -18,7 +18,11 @@ from typing import List, Optional
 
 import streamlit as st
 from dotenv import load_dotenv
-from passlib.hash import bcrypt
+from passlib.hash import argon2
+pw_hash = argon2.hash(password)
+ok = argon2.verify(password, hash_from_db)
+
+
 
 # ---- core modules (must be above any call that uses them) ----------------------
 from core.dialog import handle_turn          # your deterministic NLU/logic
