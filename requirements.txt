@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 streamlit
 python-dotenv
 pydantic
@@ -16,3 +17,8 @@ plotly
 wordcloud
 passlib[bcrypt]==1.7.4
 bcrypt==4.3.0
+=======
+altair
+pandas
+streamlit
+>>>>>>> 8d03635 (Duplicate from streamlit/streamlit-template-space)
