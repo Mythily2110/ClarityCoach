@@ -1,3 +1,26 @@
+---
+title: ClarityCoach — Student Mental-Health Chatbot
+emoji: 🧭
+colorFrom: indigo
+colorTo: blue
+sdk: streamlit
+sdk_version: "1.38.0"
+app_file: app.py
+pinned: false
+license: mit
+tags:
+  - streamlit
+  - mental health
+  - chatbot
+  - education
+---
+
+# 🧭 ClarityCoach — Student Mental-Health Chatbot
+
+Friendly Streamlit app for student well-being: empathetic chat, focus timer,
+journaling + weekly summaries, exam plan, phone-free focus tips, and login.
+
+
 # ClarityCoach (Fresh LLM Chatbot Scaffold)
 
 A clean, production‑minded scaffold for a chatbot with:
