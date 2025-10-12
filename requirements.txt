@@ -1,24 +1,21 @@
-<<<<<<< HEAD
-streamlit
+# --- ClarityCoach (Streamlit Cloud friendly) ---
+streamlit>=1.36
 python-dotenv
-pydantic
-sqlmodel
+sqlmodel>=0.0.14
+pydantic<3
 dateparser
-spacy
-transformers
-sentence-transformers
-faiss-cpu
-torch
-scikit-learn
-# Optional providers:
-openai>=1.0.0
-anthropic
-plotly
-wordcloud
-passlib[bcrypt]==1.7.4
-bcrypt==4.3.0
-=======
-altair
-pandas
-streamlit
->>>>>>> 8d03635 (Duplicate from streamlit/streamlit-template-space)
+argon2-cffi          # for password hashing (you removed passlib/bcrypt)
+pandas               # used by charts / data ops
+plotly               # dashboard charts
+wordcloud            # word cloud image in dashboard
+
+# --- OPTIONAL (do NOT enable on Streamlit Cloud unless you know you need them) ---
+# openai>=1.0.0
+# anthropic
+# scikit-learn
+# spacy
+# transformers
+# sentence-transformers
+# faiss-cpu
+# torch
+
