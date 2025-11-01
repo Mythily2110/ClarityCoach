@@ -1,12 +1,4 @@
-# app.py — ClarityCoach (single-page) ============================================
-# - Login + Sign-up (local SQLite + bcrypt)
-# - Sidebar: Chat · Timer · Journal
-# - Single chat input + chips that auto-send
-# - Empathy + OFFER state machine (timer or journal)
-# - 7-day streak from journal
-# - Timer & Journal sections preserved
-# ===============================================================================
-
+# app.py — ClarityCoach (Chat • Timer • Journal) with bcrypt login
 from __future__ import annotations
 
 import re
@@ -14,370 +6,313 @@ import time
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
-from passlib.hash import argon2
-pw_hash = argon2.hash(password)
-ok = argon2.verify(password, hash_from_db)
+from passlib.hash import bcrypt  # ✅ use ONE algorithm consistently
 
-
-
-# ---- core modules (must be above any call that uses them) ----------------------
-from core.dialog import handle_turn          # your deterministic NLU/logic
-from core.tools import timer                 # FocusTimer singleton (start/pause/resume/stop)
+# --- core modules from your project ---
+from core.dialog import handle_turn
+from core.tools import timer
 from core.memory import init_db, add_journal, get_journals
 from core.analytics import init_logs
 
-# ------------------------------------------------------------------------------
-# App config / assets
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# App config
+# -----------------------------------------------------------------------------
 load_dotenv()
 st.set_page_config(page_title="ClarityCoach", page_icon="🧭", layout="centered")
 
-# Optional custom CSS
-_css_path = Path("assets/style.css")
-if _css_path.exists():
-    st.markdown(f"<style>{_css_path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
+# Optional CSS
+css = Path("assets/style.css")
+if css.exists():
+    st.markdown(f"<style>{css.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
-# ------------------------------------------------------------------------------
-# AUTH (SQLite + bcrypt, 6–72 bytes passwords)
-# ------------------------------------------------------------------------------
-USERS_DB = Path("data/users.db")
-USERS_DB.parent.mkdir(parents=True, exist_ok=True)
+# Single chat input key (avoid duplicate-key errors)
+CHAT_INPUT_KEY = "chat_input_main_v2"
 
-BCRYPT_MAX = 72  # bcrypt hashes max 72 bytes; we'll cap and validate
+# -----------------------------------------------------------------------------
+# Auth (SQLite + Passlib/bcrypt)
+# -----------------------------------------------------------------------------
+AUTH_DB = Path("auth.db").resolve()
 
-def _cap_utf8(s: str, limit: int = BCRYPT_MAX) -> str:
-    """Truncate a string so its UTF-8 encoding is <= limit bytes."""
-    if s is None:
-        return ""
-    b = s.encode("utf-8")
-    if len(b) <= limit:
-        return s
-    # remove trailing characters until <= limit bytes
-    while len(b) > limit and s:
-        s = s[:-1]
-        b = s.encode("utf-8")
-    return s
 
-def _auth_conn():
-    return sqlite3.connect(USERS_DB)
+def _auth_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(AUTH_DB)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS users ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "username TEXT UNIQUE NOT NULL,"
+        "name TEXT NOT NULL,"
+        "pw_hash TEXT NOT NULL,"
+        "created_at TEXT NOT NULL)"
+    )
+    return conn
 
-def init_auth_db():
-    with _auth_conn() as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                username   TEXT PRIMARY KEY,
-                full_name  TEXT NOT NULL,
-                pw_hash    TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+def init_auth_db() -> None:
+    _auth_conn().close()
+
+
+def create_user(username: str, name: str, password: str) -> Tuple[bool, str]:
+    username = username.strip()
+    name = name.strip()
+    if not username or not name or not password:
+        return False, "Please fill all fields."
+
+    # ✅ hash INSIDE the function (no top-level password usage)
+    pw_hash = bcrypt.hash(password)
+
+    try:
+        conn = _auth_conn()
+        with conn:
+            conn.execute(
+                "INSERT INTO users(username, name, pw_hash, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (username, name, pw_hash, datetime.utcnow().isoformat(timespec="seconds")),
             )
-        """)
-        con.commit()
+        return True, "Account created. You can sign in now."
+    except sqlite3.IntegrityError:
+        return False, "That username already exists."
+    finally:
+        conn.close()
 
-def user_exists(username: str) -> bool:
-    if not username:
-        return False
-    with _auth_conn() as con:
-        cur = con.execute("SELECT 1 FROM users WHERE username = ?", (username.strip().lower(),))
-        return cur.fetchone() is not None
 
-def create_user(username: str, full_name: str, password: str) -> tuple[bool, str]:
-    """
-    Returns (ok, message).
-    Validates username format, password 6..72 bytes, and duplicates.
-    """
-    u = (username or "").strip().lower()
-    name = (full_name or "").strip()
-    pw = (password or "")
-
-    if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", u):
-        return False, "Usernames must be 3–32 chars: letters, numbers, or _ only."
-    if not name:
-        return False, "Please enter your full name."
-    if len(pw.encode("utf-8")) < 6:
-        return False, "Password too short (min 6 characters)."
-    if len(pw.encode("utf-8")) > BCRYPT_MAX:
-        return False, f"Password too long (max {BCRYPT_MAX} bytes). Please shorten it."
-    if user_exists(u):
-        return False, "That username is already taken."
-
-    pw_hash = bcrypt.hash(_cap_utf8(pw, BCRYPT_MAX))
-    with _auth_conn() as con:
-        con.execute(
-            "INSERT INTO users (username, full_name, pw_hash) VALUES (?, ?, ?)",
-            (u, name, pw_hash),
+def get_user(username: str) -> Optional[Tuple[int, str, str, str, str]]:
+    conn = _auth_conn()
+    try:
+        cur = conn.execute(
+            "SELECT id, username, name, pw_hash, created_at FROM users WHERE username=?",
+            (username.strip(),),
         )
-        con.commit()
-    return True, "Account created."
-
-def verify_login(username: str, password: str) -> tuple[bool, str, str]:
-    """
-    Returns (ok, message, full_name). ok=True if verified.
-    Caps password to 72 bytes before verify.
-    """
-    u = (username or "").strip().lower()
-    pw = (password or "")
-    if not u or not pw:
-        return False, "Enter username and password.", ""
-
-    with _auth_conn() as con:
-        cur = con.execute("SELECT full_name, pw_hash FROM users WHERE username = ?", (u,))
         row = cur.fetchone()
-        if not row:
-            return False, "User not found.", ""
+        return row
+    finally:
+        conn.close()
 
-    full_name, pw_hash = row
-    ok = bcrypt.verify(_cap_utf8(pw, BCRYPT_MAX), pw_hash)
-    if not ok:
-        return False, "Incorrect password.", ""
-    return True, "Signed in.", full_name
 
-def auth_gate():
-    """Render login/signup and stop until authenticated."""
-    st.title("🧭 ClarityCoach — Student Mental-Health Chatbot")
-    st.caption("Not medical advice. If you're in crisis, call your local emergency number or 988 in the US.")
-    st.divider()
+def verify_login(username: str, password: str) -> Tuple[bool, str, Optional[str]]:
+    row = get_user(username)
+    if not row:
+        return False, "No such user.", None
+    _, _, name, pw_hash, _ = row
+    try:
+        ok = bcrypt.verify(password, pw_hash)
+    except Exception:
+        return False, "Password check failed.", None
+    return (True, "OK", name) if ok else (False, "Invalid credentials.", None)
 
-    tab_login, tab_signup = st.tabs(["Login", "Sign up"])
 
-    with tab_login:
-        st.subheader("Login")
-        u = st.text_input("Username", key="auth_login_user")
-        p = st.text_input("Password", type="password", key="auth_login_pass")
-        if st.button("Sign in", type="primary", use_container_width=True):
-            ok, msg, name = verify_login(u, p)
-            if ok:
-                st.session_state["user"] = {"username": u.strip().lower(), "name": name}
-                st.success(f"Welcome back, {name}!")
-                st.rerun()
-            else:
-                st.error(msg)
+def auth_gate() -> None:
+    st.header("Sign in")
+    with st.form("login_form", clear_on_submit=False):
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        submit = st.form_submit_button("Sign in", use_container_width=True)
 
-    with tab_signup:
-        st.subheader("Create a new account")
-        su_name = st.text_input("Full name", key="auth_signup_name")
-        su_user = st.text_input("Username (letters/numbers/_)", key="auth_signup_user")
-        su_pass = st.text_input("Password (6–72 bytes)", type="password", key="auth_signup_pass")
+    if submit:
+        ok, msg, name = verify_login(u, p)
+        if ok:
+            st.session_state["user"] = {"username": u, "name": name}
+            st.success(f"Welcome, {name}!")
+            st.rerun()
+        else:
+            st.error(msg)
 
-        # Live byte-length hint
-        if su_pass:
-            bytelen = len(su_pass.encode("utf-8"))
-            if bytelen > BCRYPT_MAX:
-                st.warning(f"Password is {bytelen} bytes (> {BCRYPT_MAX}). Please shorten it.")
-
+    with st.expander("Create account"):
+        su_user = st.text_input("New username", key="__su_user")
+        su_name = st.text_input("Display name", key="__su_name")
+        su_pass = st.text_input("New password", type="password", key="__su_pass")
         if st.button("Create account", use_container_width=True):
             ok, msg = create_user(su_user, su_name, su_pass)
+            (st.success if ok else st.warning)(msg)
             if ok:
-                st.success("Account created. You can sign in now.")
-            else:
-                st.warning(msg)
+                st.info("Sign in above when ready.")
 
-    st.stop()
-
-# ------------------------------------------------------------------------------
-# Boot order
-# ------------------------------------------------------------------------------
-init_db()
-init_logs()
-init_auth_db()
-
-# Gate: stop here until the user logs in
-if "user" not in st.session_state:
-    auth_gate()
-
-# ------------------------------------------------------------------------------
-# Sidebar (nav + logout)
-# ------------------------------------------------------------------------------
-if "section" not in st.session_state:
-    st.session_state.section = "Chat"
-
-with st.sidebar:
-    # identity
-    if "user" in st.session_state:
-        user = st.session_state["user"]
-        st.markdown(f"**Signed in as:** {user['name']} (`{user['username']}`)")
-
-    # navigation
-    st.header("☰ Sections")
-    st.session_state.section = st.radio(
-        "Go to", ["Chat", "Timer", "Journal"],
-        index=["Chat", "Timer", "Journal"].index(st.session_state.section),
-        label_visibility="collapsed"
-    )
-    st.caption("Tip: You can also control everything via chat (e.g., “start a 25 minute focus timer”).")
-
-    # logout
-    if st.button("Log out"):
-        st.session_state.pop("user", None)
-        st.session_state.pop("history", None)  # clear chat transcript
-        st.rerun()
-
-# ------------------------------------------------------------------------------
-# Helpers: streak, mood, empathy, tag hints
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Helpers for Chat page
+# -----------------------------------------------------------------------------
 def compute_7day_streak_from_journal() -> int:
     rows = get_journals(limit=500)
-    days_with_entry = {j.ts.date() for j in rows}
+    days = {j.ts.date() for j in rows}
     streak = 0
     cur = datetime.now().date()
-    while cur in days_with_entry:
+    while cur in days:
         streak += 1
         cur = cur - timedelta(days=1)
     return streak
 
+
 MOOD_PATTERNS = {
-    "anxious":  re.compile(r"\b(anxious|anxiety|panic|panic attack|nervous)\b", re.I),
-    "sad":      re.compile(r"\b(sad|down|depressed|low mood|hopeless)\b", re.I),
-    "stressed": re.compile(r"\b(stress(ed)?|overwhelmed|burn(ed)? ?out|too much)\b", re.I),
-    "lonely":   re.compile(r"\b(lonely|alone|isolated)\b", re.I),
-    "unwell":   re.compile(r"\b(not feeling well|feel unwell|sick|ill|not ok|not okay)\b", re.I),
+    "anxious": re.compile(r"\b(anxious|anxiety|panic|nervous)\b", re.I),
+    "sad": re.compile(r"\b(sad|depressed|low mood|hopeless)\b", re.I),
+    "stressed": re.compile(
+        r"\b(stress(ed)?|overwhelmed|burn(?:ed)?\s*out|too much|"
+        r"exhaust(?:ed|ion)|tired|fatigued|drained)\b",
+        re.I,
+    ),
+    "lonely": re.compile(r"\b(lonely|alone|isolated)\b", re.I),
 }
 
+
 def detect_mood(text: str) -> Optional[str]:
-    for label, rx in MOOD_PATTERNS.items():
-        if rx.search(text):
+    for label, rgx in MOOD_PATTERNS.items():
+        if rgx.search(text):
             return label
     return None
+
 
 def empathetic_reply(mood: str, user_text: str) -> str:
     steps = {
         "anxious": [
-            "Try the 4-7-8 breath once: inhale 4s, hold 7s, exhale 8s.",
-            "Write your top worry, then a 10-minute 'first step' you can do now."
+            "Try 4-7-8 breathing once.",
+            "Write the top worry and a 10-minute first step.",
         ],
         "sad": [
-            "Do one gentle thing: water, 60s stretch, or open a window.",
-            "Note one small win from today (even tiny)."
+            "Do one gentle thing: water, stretch, or step outside.",
+            "Note one small win from today.",
         ],
         "stressed": [
-            "Quick brain-dump for 2 minutes to park everything.",
-            "Pick a 10-minute task and start a timer—progress beats perfection."
+            "Dump everything into a quick 2-minute brain-dump.",
+            "Pick a single 10-minute task and start a timer.",
         ],
         "lonely": [
             "Send a 'thinking of you' message to one person.",
-            "Sit near people (library/cafe) 15–20 minutes for ambient connection."
-        ],
-        "unwell": [
-            "Drink water and rest a little; lighten the plan today.",
-            "When ready, try a 10-minute easy task."
+            "Sit near people (library/cafe) for 15–20 minutes.",
         ],
     }
-    s = steps.get(mood, [
-        "Take one slow breath (4-4-6), then name what you feel.",
-        "Pick one small next step that helps Future-You."
-    ])
+    s = steps.get(mood, ["Take a slow 4-4-6 breath.", "Pick a tiny next step."])
     title = {
         "anxious": "It makes sense to feel anxious.",
-        "sad": "I'm really sorry you're feeling low.",
+        "sad": "I'm sorry you're feeling low.",
         "stressed": "That sounds like a lot to carry.",
-        "lonely": "Feeling disconnected can really sting.",
-        "unwell": "Sorry you're not feeling well today.",
+        "lonely": "Feeling disconnected can sting.",
     }.get(mood, "I'm listening.")
     return (
         f"**{title}**\n\n"
-        f"I’m here with you. Two tiny moves you can try now:\n"
+        f"Two tiny moves to try:\n"
         f"1) {s[0]}\n"
         f"2) {s[1]}\n\n"
-        f"If you like, I can **start a focus timer** or **add a quick journal note**."
+        f"If it helps, I can start a 10-minute focus timer or add a quick journal note."
     )
 
 def tag_hints(text: str) -> List[str]:
     tags = []
-    lower = text.lower()
-    if any(k in lower for k in ["exam", "test", "quiz", "assignment"]): tags.append("exams")
-    if "sleep" in lower or "tired" in lower: tags.append("sleep")
-    if "friend" in lower or "family" in lower: tags.append("relationships")
-    if "focus" in lower or "distraction" in lower or "phone" in lower: tags.append("focus")
-    if "anxiety" in lower or "panic" in lower: tags.append("anxiety")
-    if "stress" in lower or "overwhelm" in lower: tags.append("stress")
+    t = text.lower()
+    if any(k in t for k in ["exam", "quiz", "assignment"]):
+        tags.append("exams")
+    if "sleep" in t or "tired" in t:
+        tags.append("sleep")
+    if any(k in t for k in ["focus", "distraction", "phone"]):
+        tags.append("focus")
+    if "anxiety" in t or "panic" in t:
+        tags.append("anxiety")
+    if "stress" in t or "overwhelm" in t:
+        tags.append("stress")
     return tags[:3]
 
-def _is_affirmation(t: str) -> bool:
-    return re.fullmatch(r"\s*(sure|yes|yeah|yup|ok(?:ay)?|alright|please|go ahead)\.?\s*", t, flags=re.I) is not None
-
-def _extract_minutes(t: str, default_min: int = 10) -> int:
-    m = re.search(r"(\d+)\s*(min|minute|minutes|m)\b", t, re.I)
-    return int(m.group(1)) if m else default_min
-
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Header
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 st.title("🧭 ClarityCoach — Student Mental-Health Chatbot")
 st.caption("Not medical advice. If you're in crisis, call your local emergency number or 988 in the US.")
 st.divider()
 
-# -------------------- CHAT SECTION --------------------
-if st.session_state.section == "Chat":
-    # Streak pill
-    streak = compute_7day_streak_from_journal()
-    streak_text = f"🔥 {streak}-day streak" if streak > 0 else "Let’s start a streak today ✨"
-    st.markdown(f"<div style='margin-bottom:.5rem; font-weight:600;'>{streak_text}</div>",
-                unsafe_allow_html=True)
+# -----------------------------------------------------------------------------
+# Init stores
+# -----------------------------------------------------------------------------
+init_db()
+init_logs()
+init_auth_db()
 
-    # --- helper to fire a chip without touching the chat_input widget ---
-    def _fire_chip(txt: str):
-        # store the text and request a rerun; we'll process before showing chat_input
-        st.session_state["__chip_text"] = txt
-        st.session_state["__chip_fire"] = True
+# -----------------------------------------------------------------------------
+# Auth gate
+# -----------------------------------------------------------------------------
+if "user" not in st.session_state:
+    auth_gate()
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# Sidebar navigation
+# -----------------------------------------------------------------------------
+if "section" not in st.session_state:
+    st.session_state.section = "Chat"
+
+with st.sidebar:
+    st.header("☰ Sections")
+    st.session_state.section = st.radio(
+        "Go to",
+        ["Chat", "Timer", "Journal"],
+        index=["Chat", "Timer", "Journal"].index(st.session_state.section),
+        label_visibility="collapsed",
+    )
+    user = st.session_state["user"]
+    st.markdown(f"**Signed in as:** {user['name']} (`{user['username']}`)")
+    if st.button("Log out"):
+        st.session_state.pop("user", None)
         st.rerun()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.button("3-day exam plan", on_click=_fire_chip,
-              args=("I have an exam in 3 days. Make me a realistic 3-day study plan.",))
-    c2.button("rewrite kindly", on_click=_fire_chip,
-              args=("rewrite kindly: I keep failing and feel stupid",))
-    c3.button("focus w/o phone", on_click=_fire_chip,
-              args=("tips to focus without my phone",))
-    c4.button("summarize week", on_click=_fire_chip,
-              args=("summarize my week",))
+# -----------------------------------------------------------------------------
+# CHAT
+# -----------------------------------------------------------------------------
+if st.session_state.section == "Chat":
+    streak = compute_7day_streak_from_journal()
+    pill = f"🔥 {streak}-day streak" if streak else "Let’s start a streak ✨"
+    st.markdown(f"<div style='font-weight:600;margin-bottom:.5rem'>{pill}</div>", unsafe_allow_html=True)
 
-    # ---- render prior turns ----
+    c1, c2, c3, c4 = st.columns(4)
+
+    def _fill_and_send(txt: str):
+        st.session_state[CHAT_INPUT_KEY] = txt
+        st.session_state["__send_now"] = True
+        st.rerun()
+
+    c1.button("3-day exam plan", on_click=_fill_and_send,
+              args=("I have an exam in 3 days. Make me a realistic 3-day study plan.",),
+              use_container_width=True)
+    c2.button("rewrite kindly", on_click=_fill_and_send,
+              args=("rewrite kindly: I keep failing and feel stupid",),
+              use_container_width=True)
+    c3.button("focus w/o phone", on_click=_fill_and_send,
+              args=("tips to focus without my phone",),
+              use_container_width=True)
+    c4.button("summarize week", on_click=_fill_and_send,
+              args=("summarize my week",),
+              use_container_width=True)
+
+    # previous turns
     if "history" not in st.session_state:
         st.session_state.history = []
+
     for role, msg in st.session_state.history:
         st.chat_message("user" if role == "user" else "assistant").markdown(msg)
 
-    # ---- process any chip text BEFORE we create chat_input ----
-    if st.session_state.pop("__chip_fire", False):
-        chip_text = st.session_state.pop("__chip_text", "").strip()
-        if chip_text:
-            st.chat_message("user").markdown(chip_text)
-            # empathy first, then your handle_turn
-            mood = detect_mood(chip_text)
-            if mood:
-                reply = empathetic_reply(mood, chip_text)
-            else:
-                reply = handle_turn(chip_text)
+    prompt = st.chat_input("Tell me what's up… (e.g., start a 25 minute focus timer)", key=CHAT_INPUT_KEY)
+    if st.session_state.pop("__send_now", False):
+        prompt = st.session_state.get(CHAT_INPUT_KEY, "")
 
-            with st.chat_message("assistant"):
-                st.markdown(reply)
-
-            st.session_state.history.append(("user", chip_text))
-            st.session_state.history.append(("assistant", reply))
-            st.rerun()
-
-    # ---- regular free-typed chat input (we never try to set its value programmatically) ----
-    prompt = st.chat_input("Tell me what's up… (e.g., start a 25 minute focus timer)",
-                           key="chat_input_main_v3")
     if prompt:
         st.chat_message("user").markdown(prompt)
         with st.chat_message("assistant"):
-            # show a quick typing placeholder if you want:
-            # ph = st.empty(); ph.markdown("…")
+            placeholder = st.empty()
+            placeholder.markdown("…")
+
             mood = detect_mood(prompt)
-            reply = empathetic_reply(mood, prompt) if mood else handle_turn(prompt)
-            st.markdown(reply)
+            if mood:
+                reply = empathetic_reply(mood, prompt)
+            else:
+                reply = handle_turn(prompt)  # your NLU/LLM routing
+
+            placeholder.markdown(reply)
+
         st.session_state.history.append(("user", prompt))
         st.session_state.history.append(("assistant", reply))
         st.rerun()
 
-
-# ------------------------------------------------------------------------------
-# SECTION: TIMER
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# TIMER
+# -----------------------------------------------------------------------------
 if st.session_state.section == "Timer":
     st.subheader("⏱️ Focus Timer")
     c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
@@ -385,33 +320,38 @@ if st.session_state.section == "Timer":
         mins = st.number_input("Minutes", min_value=1, max_value=120, value=25, step=1)
     with c2:
         if st.button("Start", use_container_width=True):
-            timer.start(int(mins)); st.rerun()
+            timer.start(int(mins))
+            st.rerun()
     with c3:
         if timer.running and not timer.paused:
-            if st.button("Pause", use_container_width=True): timer.pause(); st.rerun()
+            if st.button("Pause", use_container_width=True):
+                timer.pause()
+                st.rerun()
         elif timer.running and timer.paused:
-            if st.button("Resume", use_container_width=True): timer.resume(); st.rerun()
+            if st.button("Resume", use_container_width=True):
+                timer.resume()
+                st.rerun()
         else:
             st.button("Pause", disabled=True, use_container_width=True)
     with c4:
-        if st.button("Stop", use_container_width=True): timer.stop(); st.rerun()
+        if st.button("Stop", use_container_width=True):
+            timer.stop()
+            st.rerun()
 
-    try:
-        pct = int(timer.progress_ratio() * 100)
-    except ZeroDivisionError:
-        pct = 0
+    pct = int(timer.progress_ratio() * 100)
     st.progress(pct, text=f"{pct}% complete")
     if timer.running and not timer.paused:
         st.info(timer.status_text())
-        time.sleep(1); st.rerun()
+        time.sleep(1)
+        st.rerun()
     elif timer.running and timer.paused:
         st.warning("Paused.")
     else:
         st.info("Timer is idle. Set minutes and press Start.")
 
-# ------------------------------------------------------------------------------
-# SECTION: JOURNAL
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# JOURNAL
+# -----------------------------------------------------------------------------
 if st.session_state.section == "Journal":
     st.subheader("📒 Journal")
     st.caption("Write a quick note. The bot can summarize your week from your entries.")
@@ -419,7 +359,8 @@ if st.session_state.section == "Journal":
     def _save_journal():
         text = st.session_state.get("journal_text", "").strip()
         if not text:
-            st.session_state["__journal_msg"] = ("warn", "Write something before saving."); return
+            st.session_state["__journal_msg"] = ("warn", "Write something before saving.")
+            return
         add_journal(text)
         st.session_state["journal_text"] = ""
         st.session_state["__journal_msg"] = ("ok", "Saved to your journal.")
@@ -439,14 +380,15 @@ if st.session_state.section == "Journal":
         cols = st.columns(3)
         for i, p in enumerate(prompts):
             if cols[i].button(p):
-                st.session_state["journal_text"] = (st.session_state.get("journal_text", "") + " " + p).strip()
+                st.session_state["journal_text"] = (
+                    (st.session_state.get("journal_text", "") + " " + p).strip()
+                )
 
     note = st.text_area(
         "Add a quick note",
         key="journal_text",
-        placeholder="How are you feeling? What did you work on?"
+        placeholder="How are you feeling? What did you work on?",
     )
-
     colA, colB = st.columns(2)
     colA.button("Add to Journal", use_container_width=True, on_click=_save_journal)
     colB.button("Summarize my week", use_container_width=True, on_click=_summarize_week)
@@ -461,12 +403,6 @@ if st.session_state.section == "Journal":
         st.info("No entries yet. Try writing one line.")
     else:
         for j in rows:
-            lower = j.text.lower()
-            tags = []
-            if any(k in lower for k in ["exam", "test", "quiz", "assignment"]): tags.append("exams")
-            if "sleep" in lower or "tired" in lower: tags.append("sleep")
-            if "focus" in lower or "distraction" in lower or "phone" in lower: tags.append("focus")
-            if "anxiety" in lower or "panic" in lower: tags.append("anxiety")
-            if "stress" in lower or "overwhelm" in lower: tags.append("stress")
+            tags = tag_hints(j.text)
             hint = f"  \n<span style='opacity:.7'>tags: {', '.join(tags)}</span>" if tags else ""
             st.markdown(f"**{j.ts:%Y-%m-%d %H:%M}** — {j.text}{hint}", unsafe_allow_html=True)
