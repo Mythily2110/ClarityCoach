@@ -1,157 +1,192 @@
-from typing import List
-from .nlu import detect_intent, extract_entities
-from .rag import tips_for_focus_phone, tips_for_stress, kb_search_unique
-from .tools import timer as TIMER
-from .memory import add_journal, get_journals
+import re
+from typing import List, Dict, Set
 
-# -------------------------------------------------------------------
-# Small, deterministic helpers (no API key)
-# 
-# -
-# 
-#------------------------------------------------------------------
-def _exam_study_plan() -> str:
-    return (
-        "**3-Day Realistic Study Plan 📘**\n\n"
-        "Here’s a focused approach you can start today:\n\n"
-        "**Day 1 – Understand & Review Basics**\n"
-        "• Go through all key topics once quickly.\n"
-        "• Mark areas that feel confusing.\n"
-        "• Take short notes in your own words.\n\n"
-        "**Day 2 – Practice & Strengthen**\n"
-        "• Do sample questions or mock tests on weak areas.\n"
-        "• Use active recall (test yourself, don’t just reread).\n"
-        "• Revise formulas / concepts you missed yesterday.\n\n"
-        "**Day 3 – Final Review & Calm Prep**\n"
-        "• Skim through summaries and key notes only.\n"
-        "• Sleep early, eat well, and avoid last-minute cramming.\n"
-        "• Spend 10-15 minutes visualizing success.\n\n"
-        "🧠 *Tip:* Use 25-minute Pomodoro blocks, then rest 5 minutes. "
-        "You can say “start a 25 minute focus timer” if you want me to time it."
-    )
+RISK = re.compile(r"\b(suicide|kill myself|end it all|want to die|self[- ]harm|cutting)\b", re.I)
+PANIC = re.compile(r"\b(panic attack|can.?t breathe|heart racing|chest tight|dizzy|hyperventilat)\b", re.I)
+HEALTH_ALERT = re.compile(r"\b(chest pain|severe headache|fainting|passed out|stroke|seizure)\b", re.I)
 
-def _focus_no_phone_tips() -> str:
-    return (
-        "**Phone-free focus ideas**\n\n"
-        "• Put the phone in another room; if needed, use Do Not Disturb or airplane mode.\n"
-        "• Use a site blocker on laptop (e.g., block socials for 30–60 minutes).\n"
-        "• Work in short sprints: 20–30 minutes, then a 5-minute stretch/water break.\n"
-        "• Keep only one tab/app visible; full-screen the work window.\n"
-        "• Prepare a zero-friction start: write a 1-line next action and begin there.\n"
-        "• If urges hit, jot them on a 'later list' instead of picking up the phone.\n\n"
-        "_If you like, say something like 'start a 25 minute focus timer' and I’ll run it._"
-    )
+INTENT_PATTERNS = {
+    "anxiety_worry": r"\b(anxious|anxiety|worry|worried|panic|nervous|overthink)\b",
+    "low_mood_depression": r"\b(depressed|worthless|useless|empty|numb|hopeless)\b",
+    "stress_overwhelm": r"\b(stress(ed)?|overwhelmed|burn(?:ed)?\s*out|too much|exhausted)\b",
+    "loneliness_isolation": r"\b(lonely|alone|isolated|no one cares)\b",
+    "relationship_conflict": r"\b(boyfriend|girlfriend|partner|spouse|breakup|argu(?:e|ment)|fight)\b",
+    "work_school_performance": r"\b(manager|boss|work|salary|deadline|job|exam|quiz|assignment|grade|professor|class)\b",
+    "financial_stress": r"\b(rent|bills?|loan|debt|tuition|money)\b",
+    "sleep_issue": r"\b(sleep|insomnia|can.?t sleep|nightmare|wake up|tired)\b",
+    "boredom_motivation": r"\b(bored|no motivation|can.?t start|stuck)\b",
+    "planning_productivity": r"\b(plan|schedule|timer|focus|pomodoro|study plan)\b",
+    "gratitude_reflection": r"\b(grateful|gratitude|appreciate)\b",
+    "small_talk": r"\b(hi|hello|hey|how are you|what.?s up)\b",
+}
 
-def _rewrite_kindly(txt: str) -> str:
-    """Very small, safe paraphraser to make text gentler without LLMs."""
-    if not txt:
-        return "Here’s a gentler way to put that: I’m having a hard time right now, but I’m learning and trying again."
-    s = txt.strip()
-    # soften a few harsh words
-    replacements = {
-        "stupid": "discouraged",
-        "idiot": "really frustrated",
-        "fail": "not going as planned",
-        "failing": "not going the way I hoped",
-        "hopeless": "really tough",
-        "useless": "stuck",
-    }
-    out = s
-    for k, v in replacements.items():
-        out = out.replace(k, v).replace(k.capitalize(), v)
+def detect_intents(text: str) -> List[str]:
+    text_l = text.lower()
+    if RISK.search(text_l):
+        return ["crisis_risk"]
+    if PANIC.search(text_l):
+        return ["panic_attack"]
+    if HEALTH_ALERT.search(text_l):
+        return ["health_concern"]
 
-    return (
-        "Here’s a kinder way to put that:\n\n"
-        f"**“{out}.”**\n\n"
-        "You’re not alone—progress is messy. What’s one tiny step you could try next?"
-    )
+    found: List[str] = []
+    for k, pattern in INTENT_PATTERNS.items():
+        if re.search(pattern, text_l, re.I):
+            found.append(k)
 
-def _weekly_summary(limit: int = 50) -> str:
-    rows = list(get_journals(limit=limit))
-    if not rows:
-        return "No journal entries yet. Try writing a one-line note each day—then I can summarize your week."
-
-    # very small heuristic summary
-    days = sorted({j.ts.date() for j in rows})
-    total = len(rows)
-    latest = max(j.ts for j in rows)
-    example = rows[-1].text[:120].replace("\n", " ")
-
-    # tag hints
-    tags = []
-    for j in rows:
-        t = j.text.lower()
-        if any(k in t for k in ["exam", "test", "quiz", "assignment"]) and "exams" not in tags: tags.append("exams")
-        if ("sleep" in t or "tired" in t) and "sleep" not in tags: tags.append("sleep")
-        if ("focus" in t or "phone" in t or "distraction" in t) and "focus" not in tags: tags.append("focus")
-        if ("anxiety" in t or "panic" in t) and "anxiety" not in tags: tags.append("anxiety")
-        if ("stress" in t or "overwhelm" in t) and "stress" not in tags: tags.append("stress")
-
-    parts = [
-        f"**This week at a glance**",
-        f"- {total} entries across {len(days)} day(s). Latest entry: {latest:%a %b %d %H:%M}.",
-        f"- Common themes: {', '.join(tags) if tags else 'varied'}.",
-        f"- Recent note: _{example}…_",
-        "",
-        "**Tiny next steps**",
-        "- Keep a one-line journal daily for momentum.",
-        "- Run one 10–25 minute focus block on something that matters.",
-        "- If stressed: brain-dump for 2 minutes, then choose one small next move.",
+    # pick up to 2 most helpful
+    # prioritize emotional + situational over small_talk
+    priority = [
+        "anxiety_worry","low_mood_depression","stress_overwhelm","loneliness_isolation",
+        "relationship_conflict","work_school_performance","financial_stress","sleep_issue",
+        "boredom_motivation","planning_productivity","gratitude_reflection","small_talk"
     ]
-    return "\n".join(parts)
+    found_sorted = [i for i in priority if i in found]
+    return found_sorted[:2] or ["small_talk"]
 
-# -------------------------------------------------------------------
-# Main turn handler
-# -------------------------------------------------------------------
+def h_crisis(_: str) -> str:
+    return (
+        "**I’m really glad you reached out.** When things feel this heavy, please get immediate help.\n\n"
+        "- If you’re in the US, call or text **988** (24/7). If outside the US, contact your local emergency number.\n"
+        "- If you’d like, I can guide a 60-second grounding exercise right now."
+    )
+
+def h_panic(_: str) -> str:
+    return (
+        "**That sounds frightening. Let’s do a quick 60-second reset.**\n"
+        "1) Breathe in 4 • hold 4 • out 6 — three times.\n"
+        "2) Name 5 things you can see, 4 you can touch, 3 you can hear, 2 you can smell, 1 you can taste.\n"
+        "3) When ready, tell me one tiny next step (e.g., sip water, step outside for 1 minute)."
+    )
+
+def h_health(_: str) -> str:
+    return (
+        "Those symptoms can be serious. I’m not a medical service — please seek **medical advice now** or emergency care "
+        "if symptoms are acute. I can stay with you through a short breathing exercise if that helps."
+    )
+
+def h_anxiety(text: str) -> str:
+    return (
+        "**It makes sense to feel keyed-up.** Two tiny moves:\n"
+        "• Do a 2-minute brain-dump: write every worry without judging.\n"
+        "• Pick one 10-minute task and start a focus timer. I can help you time it."
+    )
+
+def h_low_mood(text: str) -> str:
+    return (
+        "**I’m sorry you’re feeling low.** Try one gentle action:\n"
+        "• Water, stretch, or sit near daylight for 2 minutes.\n"
+        "• Note one small thing you handled today. I can save it to your journal."
+    )
+
+def h_stress(text: str) -> str:
+    return (
+        "**That’s a lot to carry.** Let’s shrink it:\n"
+        "• List the top 3 tasks. Circle just one and do a 10-minute starter.\n"
+        "• Batch the rest for later. Want me to start a 10-minute timer?"
+    )
+
+def h_lonely(text: str) -> str:
+    return (
+        "**Feeling disconnected can sting.** Two small ideas:\n"
+        "• Send a simple ‘thinking of you’ text to one person.\n"
+        "• Sit near people (library/café) for 15–20 minutes."
+    )
+
+def h_relationship(text: str) -> str:
+    return (
+        "**Conflicts are draining.** Try this:\n"
+        "• Write what you feel + what you need in one sentence each.\n"
+        "• If you speak, use “when X happens, I feel Y. I need Z.”\n"
+        "Want to store a draft in your journal?"
+    )
+
+def h_work_school(text: str) -> str:
+    # if user mentions exam, call your existing exam plan function
+    if re.search(r"\b(exam|quiz|test)\b", text, re.I):
+        # <- call your current exam-plan helper if you have one
+        return (
+            "**Exam coming up?** I can make a 3-day study plan with short blocks.\n"
+            "Say: *make me a realistic 3-day plan*."
+        )
+    # else default
+    return (
+        "**Work/school pressure is real.** Two tiny steps:\n"
+        "• Write the next *visible* task (e.g., open slide deck, reply to John).\n"
+        "• Start a 10-minute timer to just begin."
+    )
+
+def h_finance(text: str) -> str:
+    return (
+        "**Money stress is heavy.** Two quick moves:\n"
+        "• Write a 3-number snapshot: rent/bills/free.\n"
+        "• Email yourself a ‘mini-plan’ to call one resource tomorrow.\n"
+        "I can save today’s note into your journal."
+    )
+
+def h_sleep(text: str) -> str:
+    return (
+        "**Sleep struggles compound everything.** Tonight:\n"
+        "• Pick a 30-min wind-down: dim lights, screens away, warm shower.\n"
+        "• Try 4-7-8 breathing in bed for 1 minute."
+    )
+
+def h_boredom(text: str) -> str:
+    return (
+        "**Let’s shake boredom.** Choose one 15-minute activity:\n"
+        "• Walk & music • doodle/journal • tidy one small area • text a friend.\n"
+        "Want me to start a 15-minute timer?"
+    )
+
+def h_planning(text: str) -> str:
+    return (
+        "**We can make a tiny plan.** Tell me one task and we’ll do a 10-minute focus block.\n"
+        "I can also add a one-line journal after."
+    )
+
+def h_gratitude(text: str) -> str:
+    return (
+        "**Gratitude check-in.** Finish this: *One thing I appreciated today was…*\n"
+        "Say it here and I’ll save it to your journal."
+    )
+
+def h_smalltalk(text: str) -> str:
+    return "Hi! I’m here for chat or quick support. Tell me what’s on your mind, or say ‘start a 10-minute timer’."
+
+INTENT_HANDLERS = {
+    "crisis_risk": h_crisis,
+    "panic_attack": h_panic,
+    "health_concern": h_health,
+    "anxiety_worry": h_anxiety,
+    "low_mood_depression": h_low_mood,
+    "stress_overwhelm": h_stress,
+    "loneliness_isolation": h_lonely,
+    "relationship_conflict": h_relationship,
+    "work_school_performance": h_work_school,
+    "financial_stress": h_finance,
+    "sleep_issue": h_sleep,
+    "boredom_motivation": h_boredom,
+    "planning_productivity": h_planning,
+    "gratitude_reflection": h_gratitude,
+    "small_talk": h_smalltalk,
+}
 
 def handle_turn(user_text: str) -> str:
-    intent = detect_intent(user_text)
-    ents = extract_entities(user_text)
+    intents = detect_intents(user_text)
 
-    # Timer tools
-    if intent == "pomodoro_start":
-        mins = ents.get("duration_min") or 25
-        TIMER.start(int(mins))
-        return f"Started a **{int(mins)}-minute** focus timer."
-    if intent == "pomodoro_stop":
-        TIMER.stop()
-        return "Stopped the timer."
-    if intent == "pomodoro_status":
-        pct = int(TIMER.progress_ratio() * 100)
-        return f"{pct}% complete. {TIMER.status_text()}"
-    if intent == "focus_tips_phonefree":
-        return _focus_no_phone_tips()
-    if intent == "exam_study_plan":
-        return _exam_study_plan()
+    # hard priorities already enforced in detect_intents
+    if intents == ["crisis_risk"]:
+        return INTENT_HANDLERS["crisis_risk"](user_text)
+    if intents == ["panic_attack"]:
+        return INTENT_HANDLERS["panic_attack"](user_text)
+    if intents == ["health_concern"]:
+        return INTENT_HANDLERS["health_concern"](user_text)
 
-    # Journal
-    if intent == "journal_add":
-        add_journal(user_text)
-        return "Added to your journal. Want a weekly summary?"
-    if intent == "journal_summary":
-        return _weekly_summary()
-
-    # Tips (no duplicates, clean formatting)
-    if intent == "focus_phone_tips":
-        tips = tips_for_focus_phone()
-        return "**Focus without your phone — quick playbook**\n\n" + "\n".join(f"- {t}" for t in tips)
-    if intent == "stress_tips":
-        tips = tips_for_stress()
-        return "**Handling stress — try these**\n\n" + "\n".join(f"- {t}" for t in tips)
-
-    # Rewrite kindly
-    if intent == "rewrite_kindly":
-        txt = ents.get("rewrite_text") or user_text.split(":", 1)[-1]
-        return _rewrite_kindly(txt)
-
-    # Greeting/Goodbye
-    if intent == "greeting":
-        return "Hi! I can help with focus routines, journaling, quick tips, or a weekly summary."
-    if intent == "goodbye":
-        return "Take care! Come back anytime."
-
-    # Fallback: retrieve 3 focused snippets, unique and clean
-    chunks = kb_search_unique(user_text, k=3)
-    if chunks:
-        return "\n\n".join(chunks) + "\n\n*Want me to tailor a tiny 3-step plan for today?*"
-    return "I’m not fully sure yet, but I can help you set a 10-minute focus block or record a one-line journal."
+    # combine up to two skills concisely
+    msgs = []
+    for it in intents:
+        fn = INTENT_HANDLERS.get(it)
+        if fn:
+            msgs.append(fn(user_text))
+    # Join compactly (keep it short)
+    return "\n\n".join(msgs[:2])
