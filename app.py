@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
-from passlib.context import CryptContext  # ✅ supports bcrypt + argon2 safely
+from passlib.context import CryptContext  # supports bcrypt + argon2
 
 # --- core modules from your project ---
 from core.dialog import handle_turn
@@ -36,7 +36,7 @@ CHAT_INPUT_KEY = "chat_input_main_v2"
 # Auth (SQLite + Passlib CryptContext)
 # -----------------------------------------------------------------------------
 AUTH_DB = Path("auth.db").resolve()
-# First scheme used for new hashes; will also verify legacy argon2 if present
+# First scheme is used for new hashes; verifies legacy argon2 too.
 pwd_context = CryptContext(schemes=["bcrypt", "argon2"], deprecated="auto")
 
 
@@ -63,7 +63,7 @@ def create_user(username: str, name: str, password: str) -> Tuple[bool, str]:
     if not username or not name or not password:
         return False, "Please fill all fields."
 
-    # ✅ hash INSIDE the function (no top-level password usage)
+    # hash INSIDE the function
     pw_hash = pwd_context.hash(password)
 
     try:
@@ -304,7 +304,7 @@ if st.session_state.section == "Chat":
             if mood:
                 reply = empathetic_reply(mood, prompt)
             else:
-                reply = handle_turn(prompt)  # your NLU/LLM routing
+                reply = handle_turn(prompt)
 
             placeholder.markdown(reply)
 
