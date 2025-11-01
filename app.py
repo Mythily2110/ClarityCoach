@@ -1,4 +1,4 @@
-# app.py — ClarityCoach (Chat • Timer • Journal) with bcrypt login
+# app.py — ClarityCoach (Chat • Timer • Journal) with SQLite auth
 from __future__ import annotations
 
 import re
@@ -10,7 +10,7 @@ from typing import List, Optional, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
-from passlib.hash import bcrypt  # ✅ use ONE algorithm consistently
+from passlib.context import CryptContext  # ✅ supports bcrypt + argon2 safely
 
 # --- core modules from your project ---
 from core.dialog import handle_turn
@@ -33,9 +33,11 @@ if css.exists():
 CHAT_INPUT_KEY = "chat_input_main_v2"
 
 # -----------------------------------------------------------------------------
-# Auth (SQLite + Passlib/bcrypt)
+# Auth (SQLite + Passlib CryptContext)
 # -----------------------------------------------------------------------------
 AUTH_DB = Path("auth.db").resolve()
+# First scheme used for new hashes; will also verify legacy argon2 if present
+pwd_context = CryptContext(schemes=["bcrypt", "argon2"], deprecated="auto")
 
 
 def _auth_conn() -> sqlite3.Connection:
@@ -62,7 +64,7 @@ def create_user(username: str, name: str, password: str) -> Tuple[bool, str]:
         return False, "Please fill all fields."
 
     # ✅ hash INSIDE the function (no top-level password usage)
-    pw_hash = bcrypt.hash(password)
+    pw_hash = pwd_context.hash(password)
 
     try:
         conn = _auth_conn()
@@ -86,8 +88,7 @@ def get_user(username: str) -> Optional[Tuple[int, str, str, str, str]]:
             "SELECT id, username, name, pw_hash, created_at FROM users WHERE username=?",
             (username.strip(),),
         )
-        row = cur.fetchone()
-        return row
+        return cur.fetchone()
     finally:
         conn.close()
 
@@ -98,7 +99,7 @@ def verify_login(username: str, password: str) -> Tuple[bool, str, Optional[str]
         return False, "No such user.", None
     _, _, name, pw_hash, _ = row
     try:
-        ok = bcrypt.verify(password, pw_hash)
+        ok = pwd_context.verify(password, pw_hash)
     except Exception:
         return False, "Password check failed.", None
     return (True, "OK", name) if ok else (False, "Invalid credentials.", None)
@@ -196,6 +197,7 @@ def empathetic_reply(mood: str, user_text: str) -> str:
         f"2) {s[1]}\n\n"
         f"If it helps, I can start a 10-minute focus timer or add a quick journal note."
     )
+
 
 def tag_hints(text: str) -> List[str]:
     tags = []
