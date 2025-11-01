@@ -1,72 +1,40 @@
----
-<<<<<<< HEAD
-title: ClarityCoach — Student Mental-Health Chatbot
-emoji: 🧭
-colorFrom: indigo
-colorTo: blue
-sdk: streamlit
-sdk_version: "1.38.0"
-app_file: app.py
-pinned: false
-license: mit
-tags:
-  - streamlit
-  - mental health
-  - chatbot
-  - education
----
-
 # 🧭 ClarityCoach — Student Mental-Health Chatbot
 
-Friendly Streamlit app for student well-being: empathetic chat, focus timer,
-journaling + weekly summaries, exam plan, phone-free focus tips, and login.
+ClarityCoach is a lightweight Streamlit app that combines:
+- **Chat** (empathetic replies + optional LLM backends),
+- **Focus Timer**, and
+- **Journal** with simple analytics,
 
+…wrapped with a minimal **SQLite + Passlib (bcrypt)** login system.
 
-# ClarityCoach (Fresh LLM Chatbot Scaffold)
+> **Note**: ClarityCoach is not medical advice. If you’re in crisis, call your local emergency number or 988 in the US.
 
-A clean, production‑minded scaffold for a chatbot with:
-- NLU (intents/entities) • Dialogue manager (policies) • RAG (vector search)
-- LLM abstraction (OpenAI/Anthropic/local) • Tools/Function calling
-- Safety guardrails • Journaling & persistence • Analytics hooks
-
-## Quickstart
-1) Create a venv (optional) and install deps:
-```
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
-```
-2) Copy `.env.example` to `.env` and (optionally) set API keys + models.
-3) Run the app:
-```
-streamlit run app.py
-```
-4) Drop your knowledge files (.txt/.md) into `data/kb/`.
-
-## Milestones
-- M1: Core plumbing (runs locally with small models)
-- M2: Intent taxonomy + entity extraction
-- M3: RAG grounding (MiniLM + FAISS)
-- M4: Tool actions (pomodoro, journaling)
-- M5: Safety & escalation
-- M6: Metrics & evals
-- M7: Deploy (Hugging Face Spaces / Streamlit Cloud / Docker)
-=======
-title: Streamlit Template Space
-emoji: 🚀
-colorFrom: red
-colorTo: red
-sdk: docker
-app_port: 8501
-tags:
-  - streamlit
-pinned: false
-short_description: Streamlit template space
 ---
 
-# Welcome to Streamlit!
+## ✨ Features
 
-Edit `/src/streamlit_app.py` to customize this app to your heart's desire. :heart:
+- 🔐 **Auth**: Local SQLite user store with bcrypt hashing  
+- 💬 **Chat**: Deterministic rules + plug-in hooks for LLMs (OpenAI / Anthropic optional)  
+- ⏱️ **Timer**: Start/Pause/Resume/Stop + progress  
+- 📒 **Journal**: Save entries and view recent notes  
+- 🧠 **Mood hints**: Quick regex-based mood tags (anxious/sad/stressed/lonely)  
+- 🧩 **Modular core**: `core/` holds dialog, memory, analytics, tools
 
-If you have any questions, checkout our [documentation](https://docs.streamlit.io) and [community
-forums](https://discuss.streamlit.io).
->>>>>>> 8d03635 (Duplicate from streamlit/streamlit-template-space)
+---
+
+## 🧱 Project Structure
+
+
+> **Important:** Utility modules should define functions only—**no network calls or DB writes at import time**. Call them from `app.py` after the user triggers an action.
+
+---
+
+## 🚀 Quick Start
+
+### 1) Create & activate a virtual env
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS/Linux
+source .venv/bin/activate
